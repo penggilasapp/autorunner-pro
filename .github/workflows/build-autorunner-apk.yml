@@ -23,74 +23,35 @@ jobs:
           ZIP_FILE="./autorunner-pro-v0.4.3-kotlin-fix.zip"
 
           if [ ! -s "$ZIP_FILE" ]; then
-            echo "::error::ZIP v0.4.3 tidak ditemukan."
+            echo "::error::ZIP v0.4.3 tidak ditemukan di root repositori."
             ls -lah
             exit 1
           fi
 
-          echo "Menggunakan ZIP: $ZIP_FILE"
+          mkdir -p "$RUNNER_TEMP/autorunner-source"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/autorunner-source"
 
-          EXTRACT_DIR="$RUNNER_TEMP/autorunner-source"
-          mkdir -p "$EXTRACT_DIR"
-
-          EXPECTED_ZIP_ENTRIES=(
-            "settings.gradle.kts"
-            "app/build.gradle.kts"
-            "gradlew"
-            "gradlew.bat"
-            "gradle/wrapper/gradle-wrapper.jar"
-            "gradle/wrapper/gradle-wrapper.properties"
-          )
-
-          while IFS= read -r entry; do
-            entry="${entry#./}"
-            if [ -z "$entry" ] || [ "$entry" = "/" ] || [[ "$entry" == */ ]]; then
-              continue
-            fi
-
-            is_expected=false
-            for expected in "${EXPECTED_ZIP_ENTRIES[@]}"; do
-              if [ "$entry" = "$expected" ] || [[ "$entry" == */"$expected" ]]; then
-                is_expected=true
+          PROJECT_DIR="$(
+            find "$RUNNER_TEMP/autorunner-source" \
+              -type f -name 'settings.gradle.kts' \
+              -printf '%h\n' |
+            while read -r dir; do
+              if [ -f "$dir/app/build.gradle.kts" ]; then
+                echo "$dir"
                 break
               fi
             done
+          )"
 
-            if [ "$is_expected" = false ]; then
-              echo "::error::ZIP berisi file yang tidak diharapkan: $entry"
-              exit 1
-            fi
-          done < <(unzip -Z1 "$ZIP_FILE")
-
-          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
-
-          mapfile -t PROJECT_DIRS < <(
-            find "$EXTRACT_DIR" \
-              -type f -name 'settings.gradle.kts' -printf '%h\n' |
-            while read -r d; do
-              if [ -f "$d/app/build.gradle.kts" ]; then
-                printf '%s\n' "$d"
-              fi
-            done
-          )
-
-          if [ "${#PROJECT_DIRS[@]}" -eq 0 ]; then
+          if [ -z "$PROJECT_DIR" ]; then
             echo "::error::Proyek Android Gradle tidak ditemukan."
-            find "$EXTRACT_DIR" \
+            find "$RUNNER_TEMP/autorunner-source" \
               -maxdepth 6 -type f | head -100
             exit 1
           fi
 
-          if [ "${#PROJECT_DIRS[@]}" -gt 1 ]; then
-            echo "::error::Ditemukan lebih dari satu direktori proyek Android yang cocok:"
-            printf ' - %s\n' "${PROJECT_DIRS[@]}"
-            exit 1
-          fi
-
-          PROJECT_DIR="${PROJECT_DIRS[0]}"
-
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Proyek Android: $PROJECT_DIR"
+          echo "Proyek Android ditemukan: $PROJECT_DIR"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -101,51 +62,24 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK
+      - name: Install Android SDK platform and build tools
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "platform-tools"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Set up Gradle 8.9 fallback
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Verify Gradle wrapper and build debug APK
+      - name: Build debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Verify APK exists
         run: |
-          set -euo pipefail
+          test -s "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
-          GRADLE_CMD=""
-
-          if [ -x "./gradlew" ]; then
-            GRADLE_CMD="./gradlew"
-          elif [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            GRADLE_CMD="./gradlew"
-          elif command -v gradle >/dev/null 2>&1; then
-            echo "::warning::Gradle wrapper tidak ditemukan. Menggunakan Gradle global sebagai fallback."
-            GRADLE_CMD="$(command -v gradle)"
-          else
-            echo "::error::Gradle wrapper dan Gradle global tidak tersedia."
-            exit 1
-          fi
-
-          echo "Menggunakan Gradle: $GRADLE_CMD"
-          "$GRADLE_CMD" --version
-          "$GRADLE_CMD" --no-daemon --stacktrace assembleDebug
-
-      - name: Verify APK
-        run: |
-          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          ls -lh "$APK"
-
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: AutoRunner-Pro-debug-apk
