@@ -15,38 +15,52 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Locate and extract AutoRunner Pro ZIP
+      - name: Locate and safely extract AutoRunner Pro ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           ZIP_FILE="./autorunner-pro-v0.4.3-kotlin-fix.zip"
+          EXTRACT_DIR="$RUNNER_TEMP/autorunner-source"
 
           if [ ! -s "$ZIP_FILE" ]; then
-            echo "::error::ZIP v0.4.3 tidak ditemukan di root repositori."
+            echo "::error::ZIP v0.4.3 tidak ditemukan."
             ls -lah
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/autorunner-source"
-          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/autorunner-source"
+          python3 - "$ZIP_FILE" <<'PY'
+          import sys
+          import zipfile
+          from pathlib import PurePosixPath
 
-          PROJECT_DIR="$(
-            find "$RUNNER_TEMP/autorunner-source" \
-              -type f -name 'settings.gradle.kts' \
-              -printf '%h\n' |
-            while read -r dir; do
-              if [ -f "$dir/app/build.gradle.kts" ]; then
-                echo "$dir"
-                break
-              fi
-            done
-          )"
+          archive = sys.argv[1]
+          with zipfile.ZipFile(archive) as z:
+              for item in z.infolist():
+                  name = item.filename
+                  path = PurePosixPath(name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"Unsafe ZIP path: {name}")
+                  if "\\" in name:
+                      raise SystemExit(f"Unexpected backslash in ZIP path: {name}")
+          print("ZIP path validation passed.")
+          PY
+
+          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+          PROJECT_DIR=""
+          while IFS= read -r settings_file; do
+            candidate="$(dirname "$settings_file")"
+            if [ -f "$candidate/app/build.gradle.kts" ]; then
+              PROJECT_DIR="$candidate"
+              break
+            fi
+          done < <(find "$EXTRACT_DIR" -type f -name 'settings.gradle.kts')
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "::error::Proyek Android Gradle tidak ditemukan."
-            find "$RUNNER_TEMP/autorunner-source" \
-              -maxdepth 6 -type f | head -100
+            find "$EXTRACT_DIR" -maxdepth 6 -type f | head -100
             exit 1
           fi
 
@@ -64,6 +78,7 @@ jobs:
 
       - name: Install Android SDK platform and build tools
         run: |
+          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle 8.9
@@ -77,7 +92,12 @@ jobs:
 
       - name: Verify APK exists
         run: |
-          test -s "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -s "$APK" ]; then
+            echo "::error::APK tidak ditemukan setelah build."
+            exit 1
+          fi
+          ls -lh "$APK"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
